@@ -21,7 +21,8 @@
     "build": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "demo": "npm run dev --prefix demo"
   },
   "keywords": [
     "pixi",

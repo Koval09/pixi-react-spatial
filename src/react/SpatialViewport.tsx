@@ -2,6 +2,9 @@ import React, {
   useRef,
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useState,
+  useMemo,
   useImperativeHandle,
   forwardRef,
   type ReactNode,
@@ -10,15 +13,12 @@ import React, {
 import type { CameraState, Deadzone, Rect, Size } from '../core/camera';
 import { clampCamera, createCameraState, followTarget } from '../core/camera';
 import { createGestureState, handleGesture, type GestureState } from '../core/gestures';
-import { ViewportContext, type CameraListener, type ViewportContextValue } from './context';
-
-export interface SpatialContainerHandle {
-  position: { x: number; y: number };
-  scale: { x: number; y: number };
-}
+import { ViewportContext, type CameraListener, type ViewportContextValue, type ViewportHandle } from './context';
 
 export interface SpatialViewportProps {
   children?: ReactNode;
+  container?: unknown;
+  targetElement?: HTMLElement | null;
   worldWidth?: number;
   worldHeight?: number;
   worldBounds?: Rect;
@@ -77,17 +77,58 @@ function extractEventData(e: unknown): { x: number; y: number; pointerId: number
   return { x, y, pointerId, deltaY };
 }
 
-export const SpatialViewport = forwardRef<SpatialContainerHandle, SpatialViewportProps>(
+function applyContainerTransform(container: unknown, posX: number, posY: number, zoom: number): void {
+  if (!container) return;
+
+  const target = container as {
+    position?: { set?: (x: number, y: number) => void };
+    scale?: { set?: (x: number, y: number) => void };
+    style?: { transform?: string; transformOrigin?: string };
+  };
+
+  if (typeof target.position?.set === 'function' && typeof target.scale?.set === 'function') {
+    target.position.set(posX, posY);
+    target.scale.set(zoom, zoom);
+    return;
+  }
+
+  if (target.style && 'transform' in target.style) {
+    target.style.transformOrigin = '0 0';
+    target.style.transform = `translate3d(${posX}px, ${posY}px, 0px) scale(${zoom})`;
+    return;
+  }
+
+  throw new Error(
+    'SpatialViewport: target container must be a valid PixiJS Container instance with position.set and scale.set methods or a DOM Element.'
+  );
+}
+
+function isValidContainer(node: unknown): boolean {
+  if (!node) return false;
+  const target = node as {
+    position?: { set?: (x: number, y: number) => void };
+    scale?: { set?: (x: number, y: number) => void };
+    style?: { transform?: string };
+  };
+  return (
+    (typeof target.position?.set === 'function' && typeof target.scale?.set === 'function') ||
+    Boolean(target.style && 'transform' in target.style)
+  );
+}
+
+export const SpatialViewport = forwardRef<ViewportHandle, SpatialViewportProps>(
   function SpatialViewport(props, ref) {
     const {
       children,
-      worldWidth,
-      worldHeight,
-      worldBounds: customWorldBounds,
-      viewportWidth = 800,
-      viewportHeight = 600,
+      container: containerProp,
+      targetElement,
+      worldWidth = 8000,
+      worldHeight = 8000,
+      worldBounds: propWorldBounds,
+      viewportWidth: propViewportWidth,
+      viewportHeight: propViewportHeight,
       minZoom = 0.1,
-      maxZoom = 10,
+      maxZoom = 4.0,
       clamp = false,
       follow,
       followLerp = 0.1,
@@ -97,73 +138,128 @@ export const SpatialViewport = forwardRef<SpatialContainerHandle, SpatialViewpor
       ticker,
     } = props;
 
-    const cameraRef = useRef<CameraState>(
-      initialCamera ?? createCameraState(0, 0, 1)
-    );
-    const gestureStateRef = useRef<GestureState>(createGestureState());
-    const listenersRef = useRef<Set<CameraListener>>(new Set());
-    const internalContainerRef = useRef<SpatialContainerHandle>({
-      position: { x: 0, y: 0 },
-      scale: { x: 1, y: 1 },
-    });
+    const [observedSize, setObservedSize] = useState<Size | null>(null);
+    const viewportRootRef = useRef<HTMLDivElement | null>(null);
 
-    useImperativeHandle(ref, () => internalContainerRef.current, []);
-
-    const viewportSize: Size = {
-      width: viewportWidth,
-      height: viewportHeight,
-    };
-
-    const effectiveWorldBounds: Rect | undefined = customWorldBounds ?? (
-      worldWidth !== undefined && worldHeight !== undefined
-        ? { x: 0, y: 0, width: worldWidth, height: worldHeight }
-        : undefined
-    );
-
-    const onViewportChangeRef = useRef(onViewportChange);
+    // Imperative DOM overlay creation for Pixi canvas target mode
     useEffect(() => {
-      onViewportChangeRef.current = onViewportChange;
-    }, [onViewportChange]);
+      if (typeof document === 'undefined') return;
+      if (!targetElement) return;
 
-    const lastNotifyTimeRef = useRef(-Infinity);
-    const notifyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+      let overlay = document.querySelector<HTMLElement>('[data-testid="spatial-viewport"]');
+      let created = false;
 
-    const notifyViewportChange = useCallback((camera: CameraState) => {
-      // 1. Notify immediate subscribers
-      for (const listener of listenersRef.current) {
-        listener(camera);
+      if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.setAttribute('data-testid', 'spatial-viewport');
+        overlay.style.position = 'absolute';
+        overlay.style.inset = '0';
+        overlay.style.pointerEvents = 'none';
+        overlay.style.overflow = 'hidden';
+
+        const parent = targetElement.parentElement ?? document.body;
+        if (parent.style.position !== 'relative' && parent.style.position !== 'absolute') {
+          parent.style.position = 'relative';
+        }
+        parent.appendChild(overlay);
+        created = true;
       }
 
-      // 2. Throttled callback for onViewportChange (max once per 100ms)
-      if (!onViewportChangeRef.current) return;
-
-      const now = Date.now();
-      const elapsed = now - lastNotifyTimeRef.current;
-
-      if (elapsed >= 100) {
-        lastNotifyTimeRef.current = now;
-        onViewportChangeRef.current(camera);
-      } else if (!notifyTimeoutRef.current) {
-        notifyTimeoutRef.current = setTimeout(() => {
-          notifyTimeoutRef.current = null;
-          lastNotifyTimeRef.current = Date.now();
-          if (onViewportChangeRef.current) {
-            onViewportChangeRef.current(cameraRef.current);
-          }
-        }, 100 - elapsed);
-      }
-    }, []);
-
-    useEffect(() => {
       return () => {
-        if (notifyTimeoutRef.current) {
-          clearTimeout(notifyTimeoutRef.current);
+        if (created && overlay && overlay.parentNode) {
+          overlay.parentNode.removeChild(overlay);
         }
       };
+    }, [targetElement]);
+
+    // Dynamic ResizeObserver on root element (active ONLY when explicit viewportWidth/Height props are omitted)
+    useEffect(() => {
+      if (typeof propViewportWidth === 'number' && typeof propViewportHeight === 'number') return;
+      const root = viewportRootRef.current ?? targetElement;
+      if (!root || typeof ResizeObserver === 'undefined') return;
+
+      const observer = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const { width, height } = entry.contentRect;
+          if (width > 0 && height > 0) {
+            setObservedSize((prev) => {
+              if (prev && prev.width === width && prev.height === height) return prev;
+              return { width, height };
+            });
+          }
+        }
+      });
+
+      observer.observe(root);
+      return () => observer.disconnect();
+    }, [propViewportWidth, propViewportHeight, targetElement]);
+
+    const effectiveWorldBounds: Rect = propWorldBounds ?? {
+      x: 0,
+      y: 0,
+      width: worldWidth,
+      height: worldHeight,
+    };
+
+    const viewportSize: Size = useMemo(
+      () => ({
+        width: propViewportWidth ?? observedSize?.width ?? (typeof window !== 'undefined' ? window.innerWidth : 800),
+        height: propViewportHeight ?? observedSize?.height ?? (typeof window !== 'undefined' ? window.innerHeight : 600),
+      }),
+      [propViewportWidth, propViewportHeight, observedSize]
+    );
+
+    const cameraRef = useRef<CameraState>(
+      initialCamera ?? createCameraState(0, 0, 1.0)
+    );
+
+    const gestureStateRef = useRef<GestureState>(createGestureState());
+    const containerInstanceRef = useRef<unknown | null>(null);
+    const listenersRef = useRef<Set<CameraListener>>(new Set());
+
+    const setContainerRef = useCallback((node: unknown) => {
+      containerInstanceRef.current = node;
     }, []);
 
+    const getActiveContainer = useCallback(() => {
+      const active = containerProp ?? containerInstanceRef.current;
+      return active;
+    }, [containerProp]);
+
+    const activeContainer = getActiveContainer();
+    if (activeContainer && !isValidContainer(activeContainer)) {
+      throw new Error(
+        'SpatialViewport: target container must be a valid PixiJS Container instance with position.set and scale.set methods.'
+      );
+    }
+
+    const notifyListeners = useCallback(() => {
+      const cam = cameraRef.current;
+      for (const listener of listenersRef.current) {
+        listener(cam);
+      }
+    }, []);
+
+    const lastReportedCam = useRef<string>('');
+    const lastReportedTime = useRef<number>(0);
+
+    const checkReportChange = useCallback(() => {
+      if (!onViewportChange) return;
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      if (now - lastReportedTime.current >= 100) {
+        const cam = cameraRef.current;
+        const key = `${cam.x.toFixed(2)},${cam.y.toFixed(2)},${cam.zoom.toFixed(3)}`;
+        if (key !== lastReportedCam.current) {
+          lastReportedCam.current = key;
+          lastReportedTime.current = now;
+          onViewportChange(cam);
+        }
+      }
+    }, [onViewportChange]);
+
     const getCamera = useCallback(() => cameraRef.current, []);
-    const getViewport = useCallback(() => viewportSize, [viewportWidth, viewportHeight]);
+    const getViewport = useCallback(() => viewportSize, [viewportSize.height, viewportSize.width]);
+
     const subscribe = useCallback((listener: CameraListener) => {
       listenersRef.current.add(listener);
       return () => {
@@ -171,109 +267,156 @@ export const SpatialViewport = forwardRef<SpatialContainerHandle, SpatialViewpor
       };
     }, []);
 
-    const contextValue: ViewportContextValue = {
-      getCamera,
-      getViewport,
-      subscribe,
-    };
+    const contextValue: ViewportContextValue = useMemo(
+      () => ({
+        getCamera,
+        getViewport,
+        subscribe,
+      }),
+      [getCamera, getViewport, subscribe]
+    );
 
-    // Apply gesture events to camera
+    useImperativeHandle(ref, () => contextValue, [contextValue]);
+
+    const updateFrame = useCallback(() => {
+      let currentCam = cameraRef.current;
+
+      let targetPos: { x: number; y: number } | null = null;
+      if (follow) {
+        if ('current' in follow) {
+          targetPos = follow.current;
+        } else {
+          targetPos = follow;
+        }
+      }
+
+      if (targetPos) {
+        currentCam = followTarget(currentCam, targetPos, followLerp, followDeadzone);
+      }
+
+      if (clamp) {
+        currentCam = clampCamera(currentCam, effectiveWorldBounds, viewportSize);
+      }
+
+      const prevCam = cameraRef.current;
+      const changed =
+        prevCam.x !== currentCam.x || prevCam.y !== currentCam.y || prevCam.zoom !== currentCam.zoom;
+
+      cameraRef.current = currentCam;
+
+      const halfW = viewportSize.width / 2;
+      const halfH = viewportSize.height / 2;
+      const posX = halfW - currentCam.x * currentCam.zoom;
+      const posY = halfH - currentCam.y * currentCam.zoom;
+
+      const targetContainer = getActiveContainer();
+      applyContainerTransform(targetContainer, posX, posY, currentCam.zoom);
+
+      if (changed) {
+        notifyListeners();
+        checkReportChange();
+      }
+    }, [
+      follow,
+      followLerp,
+      followDeadzone,
+      clamp,
+      effectiveWorldBounds,
+      viewportSize,
+      getActiveContainer,
+      notifyListeners,
+      checkReportChange,
+    ]);
+
+    useLayoutEffect(() => {
+      updateFrame();
+    }, [updateFrame]);
+
     const dispatchGesture = useCallback(
-      (type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel' | 'wheel', e: unknown) => {
-        const data = extractEventData(e);
-        const config = {
-          viewport: viewportSize,
-          worldBounds: clamp ? effectiveWorldBounds : undefined,
-          minZoom,
-          maxZoom,
-        };
-
-        const res = handleGesture(
+      (
+        type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel' | 'wheel',
+        e: unknown
+      ) => {
+        const { x, y, pointerId, deltaY } = extractEventData(e);
+        const { camera: nextCam, state: nextGesture } = handleGesture(
           gestureStateRef.current,
           cameraRef.current,
           {
             type,
-            x: data.x,
-            y: data.y,
-            pointerId: data.pointerId,
-            deltaY: data.deltaY,
+            x,
+            y,
+            pointerId,
+            deltaY,
           },
-          config
+          {
+            viewport: viewportSize,
+            minZoom,
+            maxZoom,
+            worldBounds: clamp ? effectiveWorldBounds : undefined,
+          }
         );
 
-        gestureStateRef.current = res.state;
         const prevCam = cameraRef.current;
-        cameraRef.current = res.camera;
+        const changed =
+          prevCam.x !== nextCam.x || prevCam.y !== nextCam.y || prevCam.zoom !== nextCam.zoom;
 
-        if (
-          prevCam.x !== res.camera.x ||
-          prevCam.y !== res.camera.y ||
-          prevCam.zoom !== res.camera.zoom
-        ) {
-          notifyViewportChange(res.camera);
+        cameraRef.current = nextCam;
+        gestureStateRef.current = nextGesture;
+
+        updateFrame();
+
+        if (changed) {
+          notifyListeners();
+          checkReportChange();
         }
       },
-      [clamp, effectiveWorldBounds, maxZoom, minZoom, notifyViewportChange, viewportSize]
+      [viewportSize, minZoom, maxZoom, clamp, effectiveWorldBounds, updateFrame, notifyListeners, checkReportChange]
     );
 
-    // Frame update loop
-    const updateFrame = useCallback(() => {
-      let camera = cameraRef.current;
-      let changed = false;
+    // Event listeners attached to targetElement (e.g. app.canvas) or viewportRootRef
+    useEffect(() => {
+      const target = targetElement ?? viewportRootRef.current;
+      if (!target) return;
 
-      // Handle target follow
-      let followTargetObj: { x: number; y: number } | null = null;
-      if (follow) {
-        if ('current' in follow) {
-          followTargetObj = follow.current;
-        } else {
-          followTargetObj = follow;
-        }
-      }
+      const onPointerDown = (e: PointerEvent) => dispatchGesture('pointerdown', e);
+      const onPointerMove = (e: PointerEvent) => dispatchGesture('pointermove', e);
+      const onPointerUp = (e: PointerEvent) => dispatchGesture('pointerup', e);
+      const onPointerCancel = (e: PointerEvent) => dispatchGesture('pointercancel', e);
+      const onWheel = (e: WheelEvent) => {
+        e.preventDefault();
+        dispatchGesture('wheel', e);
+      };
 
-      if (followTargetObj) {
-        const nextCam = followTarget(camera, followTargetObj, followLerp, followDeadzone);
-        if (nextCam.x !== camera.x || nextCam.y !== camera.y) {
-          camera = nextCam;
-          changed = true;
-        }
-      }
+      target.addEventListener('pointerdown', onPointerDown as EventListener);
+      target.addEventListener('pointermove', onPointerMove as EventListener);
+      target.addEventListener('pointerup', onPointerUp as EventListener);
+      target.addEventListener('pointercancel', onPointerCancel as EventListener);
+      target.addEventListener('wheel', onWheel as EventListener, { passive: false });
 
-      // Clamp if enabled
-      if (clamp && effectiveWorldBounds) {
-        const clampedCam = clampCamera(camera, effectiveWorldBounds, viewportSize);
-        if (clampedCam.x !== camera.x || clampedCam.y !== camera.y) {
-          camera = clampedCam;
-          changed = true;
-        }
-      }
+      return () => {
+        target.removeEventListener('pointerdown', onPointerDown as EventListener);
+        target.removeEventListener('pointermove', onPointerMove as EventListener);
+        target.removeEventListener('pointerup', onPointerUp as EventListener);
+        target.removeEventListener('pointercancel', onPointerCancel as EventListener);
+        target.removeEventListener('wheel', onWheel as EventListener);
+      };
+    }, [targetElement, dispatchGesture]);
 
-      if (changed) {
-        cameraRef.current = camera;
-        notifyViewportChange(camera);
-      }
+    useEffect(() => {
+      if (typeof window === 'undefined' || ticker) return;
 
-      // Directly mutate container transform per frame
-      const container = internalContainerRef.current;
-      if (container) {
-        container.position.x = viewportWidth / 2 - camera.x * camera.zoom;
-        container.position.y = viewportHeight / 2 - camera.y * camera.zoom;
-        container.scale.x = camera.zoom;
-        container.scale.y = camera.zoom;
-      }
-    }, [
-      clamp,
-      effectiveWorldBounds,
-      follow,
-      followDeadzone,
-      followLerp,
-      notifyViewportChange,
-      viewportHeight,
-      viewportSize,
-      viewportWidth,
-    ]);
+      let animId: number;
+      const loop = () => {
+        updateFrame();
+        animId = requestAnimationFrame(loop);
+      };
+      animId = requestAnimationFrame(loop);
 
-    // Attach custom ticker if supplied
+      return () => {
+        cancelAnimationFrame(animId);
+      };
+    }, [ticker, updateFrame]);
+
     useEffect(() => {
       if (ticker) {
         const remove = ticker.add(updateFrame);
@@ -283,30 +426,43 @@ export const SpatialViewport = forwardRef<SpatialContainerHandle, SpatialViewpor
       }
     }, [ticker, updateFrame]);
 
-    // Event handlers for Pixi / DOM
-    const handlePointerDown = (e: React.SyntheticEvent) => dispatchGesture('pointerdown', e);
-    const handlePointerMove = (e: React.SyntheticEvent) => dispatchGesture('pointermove', e);
-    const handlePointerUp = (e: React.SyntheticEvent) => dispatchGesture('pointerup', e);
-    const handlePointerCancel = (e: React.SyntheticEvent) => dispatchGesture('pointercancel', e);
-    const handleWheel = (e: React.SyntheticEvent) => dispatchGesture('wheel', e);
+    const isPixiTree = Boolean(targetElement);
 
+    if (isPixiTree) {
+      // In PixiJS tree mode, NEVER render HTML JSX <div> elements (render ONLY pixiContainer)
+      return (
+        <ViewportContext.Provider value={contextValue}>
+          {React.createElement('pixiContainer', { ref: setContainerRef }, children)}
+        </ViewportContext.Provider>
+      );
+    }
+
+    // Standard DOM mode
     return (
       <ViewportContext.Provider value={contextValue}>
         <div
+          ref={viewportRootRef}
           data-testid="spatial-viewport"
           style={{
             position: 'relative',
-            width: viewportWidth,
-            height: viewportHeight,
+            width: typeof viewportSize.width === 'number' ? `${viewportSize.width}px` : viewportSize.width,
+            height: typeof viewportSize.height === 'number' ? `${viewportSize.height}px` : viewportSize.height,
             overflow: 'hidden',
           }}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerCancel}
-          onWheel={handleWheel}
         >
-          {children}
+          <div
+            ref={setContainerRef as (node: HTMLDivElement | null) => void}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              pointerEvents: 'none',
+            }}
+          >
+            {children}
+          </div>
         </div>
       </ViewportContext.Provider>
     );

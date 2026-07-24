@@ -2,12 +2,13 @@ import React, {
   useEffect,
   useRef,
   useCallback,
+  useState,
   type ReactNode,
   type CSSProperties,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { worldToScreen, type Point } from '../core/camera';
-import { useViewportContext } from './context';
+import { useOptionalViewportContext, type ViewportHandle } from './context';
 
 export interface WorldPortalAnchor {
   x: number;
@@ -16,17 +17,26 @@ export interface WorldPortalAnchor {
 
 export interface WorldPortalProps {
   children?: ReactNode;
-  at: Point;
+  at: Point | (() => Point);
   anchor?: number | WorldPortalAnchor;
   hideWhenOffscreen?: boolean; // default true
   interactive?: boolean; // default false
   clampToScreen?: boolean; // default false
   className?: string;
   style?: CSSProperties;
+  /**
+   * Viewport handle providing camera, viewport size, and frame subscriptions.
+   * Required when rendering WorldPortal in the DOM tree outside SpatialViewport.
+   */
+  viewport?: ViewportHandle;
   /** Custom ticker override for testing or manual frame updates */
   ticker?: { add: (fn: (delta: number) => void) => () => void };
 }
 
+/**
+ * WorldPortal projects 2D world coordinates to CSS translate3d screen positions in real-time.
+ * MUST be rendered in the react-dom tree (e.g. next to <Application>), NOT inside <Application>.
+ */
 export function WorldPortal(props: WorldPortalProps): React.ReactPortal | null {
   const {
     children,
@@ -37,22 +47,22 @@ export function WorldPortal(props: WorldPortalProps): React.ReactPortal | null {
     clampToScreen = false,
     className,
     style,
+    viewport: viewportProp,
     ticker,
   } = props;
 
-  const viewportCtx = useViewportContext();
-  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  // Resolution order: viewport prop first, then SpatialViewport context
+  const contextViewport = useOptionalViewportContext();
+  const activeViewport = viewportProp ?? contextViewport;
 
-  // Lazy creation of DOM node in effect (SSR-safe)
-  if (wrapperRef.current === null && typeof document !== 'undefined') {
-    const el = document.createElement('div');
-    el.style.position = 'absolute';
-    el.style.top = '0';
-    el.style.left = '0';
-    el.style.willChange = 'transform';
-    el.style.pointerEvents = interactive ? 'auto' : 'none';
-    wrapperRef.current = el;
+  if (!activeViewport) {
+    throw new Error(
+      'WorldPortal must receive a viewport prop or be rendered inside SpatialViewport.'
+    );
   }
+
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const [containerMounted, setContainerMounted] = useState(false);
 
   const atRef = useRef(at);
   useEffect(() => {
@@ -69,9 +79,10 @@ export function WorldPortal(props: WorldPortalProps): React.ReactPortal | null {
     const el = wrapperRef.current;
     if (!el) return;
 
-    const camera = viewportCtx.getCamera();
-    const viewport = viewportCtx.getViewport();
-    const targetAt = atRef.current;
+    const camera = activeViewport.getCamera();
+    const viewport = activeViewport.getViewport();
+    const currentAt = atRef.current;
+    const targetAt = typeof currentAt === 'function' ? currentAt() : currentAt;
     const currentAnchor = anchorRef.current;
 
     const screen = worldToScreen(targetAt, camera, viewport);
@@ -102,51 +113,89 @@ export function WorldPortal(props: WorldPortalProps): React.ReactPortal | null {
     } else {
       el.style.visibility = 'visible';
     }
-  }, [clampToScreen, hideWhenOffscreen, viewportCtx]);
+  }, [activeViewport, clampToScreen, hideWhenOffscreen]);
 
-  // Attach wrapper element to viewport container or body
+  // Attach wrapper element to viewport container or body strictly after mount effect
   useEffect(() => {
-    const el = wrapperRef.current;
-    if (!el) return;
+    if (typeof document === 'undefined') return;
 
+    const el = document.createElement('div');
+    el.style.position = 'absolute';
+    el.style.top = '0';
+    el.style.left = '0';
+    el.style.willChange = 'transform';
     el.style.pointerEvents = interactive ? 'auto' : 'none';
     if (className) el.className = className;
     if (style) {
       Object.assign(el.style, style);
     }
 
-    // Locate viewport DOM container
-    let container = document.querySelector<HTMLElement>('[data-testid="spatial-viewport"]');
-    if (!container) {
-      container = document.body;
+    wrapperRef.current = el;
+
+    let targetOverlay = document.querySelector<HTMLElement>('[data-testid="spatial-viewport"]');
+    if (!targetOverlay) {
+      targetOverlay = document.body;
     }
 
-    container.appendChild(el);
-    // Initial position sync
+    targetOverlay.appendChild(el);
     updatePosition();
+    setContainerMounted(true);
 
     return () => {
+      setContainerMounted(false);
       if (el.parentNode) {
         el.parentNode.removeChild(el);
       }
+      wrapperRef.current = null;
     };
-  }, [className, interactive, style, updatePosition]);
+  }, []);
 
-  // Subscribe to ticker or viewportContext
   useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    el.style.pointerEvents = interactive ? 'auto' : 'none';
+    if (className) el.className = className;
+    if (style) Object.assign(el.style, style);
+  }, [className, interactive, style]);
+
+  // Subscribe to ticker or activeViewport
+  useEffect(() => {
+    if (!containerMounted) return;
+
     if (ticker) {
       const remove = ticker.add(updatePosition);
       return () => {
         if (remove) remove();
       };
     } else {
-      const unsubscribe = viewportCtx.subscribe(updatePosition);
+      const unsubscribe = activeViewport.subscribe(updatePosition);
       return () => {
         unsubscribe();
       };
     }
-  }, [ticker, updatePosition, viewportCtx]);
+  }, [activeViewport, containerMounted, ticker, updatePosition]);
 
-  if (!wrapperRef.current) return null;
+  // Continuous frame loop when at is a getter function
+  useEffect(() => {
+    if (!containerMounted) return;
+
+    if (typeof at === 'function' && !ticker) {
+      let animId: number;
+      const loop = () => {
+        updatePosition();
+        animId = requestAnimationFrame(loop);
+      };
+      animId = requestAnimationFrame(loop);
+      return () => {
+        cancelAnimationFrame(animId);
+      };
+    }
+  }, [at, containerMounted, ticker, updatePosition]);
+
+  // Return null until DOM wrapper is attached to overlay to prevent leaking text nodes to Pixi React reconciler
+  if (!containerMounted || !wrapperRef.current) {
+    return null;
+  }
+
   return createPortal(children, wrapperRef.current);
 }

@@ -9,7 +9,13 @@ export interface ViewportContextValue {
   subscribe: (listener: CameraListener) => () => void;
 }
 
+export type ViewportHandle = ViewportContextValue;
+
 export const ViewportContext = createContext<ViewportContextValue | null>(null);
+
+export function useOptionalViewportContext(): ViewportContextValue | null {
+  return useContext(ViewportContext);
+}
 
 export function useViewportContext(): ViewportContextValue {
   const ctx = useContext(ViewportContext);
