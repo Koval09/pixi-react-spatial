@@ -26,8 +26,15 @@ Thumbs.db
 .env.test.local
 .env.production.local
 
-# IDE & Editors
+#. IDE & Editors
 .idea/
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+
+# Compiled JS build artifacts in source directories
+demo/src/*.js
+demo/src/*.jsx
+src/**/*.js
+demo/dist/
+

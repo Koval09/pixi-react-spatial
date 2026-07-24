@@ -150,16 +150,45 @@ describe('Quadtree core module', () => {
         qt.insert(item, { x: i * 20, y: i * 20, width: 10, height: 10 });
       }
 
+      expect(qt.rebuildCount).toBe(0);
+
       // Update 4 items (40% dirty > 30%)
       for (let i = 0; i < 4; i++) {
         qt.update(items[i], { x: 500 + i * 20, y: 500 + i * 20, width: 10, height: 10 });
       }
+
+      expect(qt.rebuildCount).toBe(1);
 
       const results = qt.query({ x: 450, y: 450, width: 200, height: 200 });
       expect(results).toHaveLength(4);
       for (let i = 0; i < 4; i++) {
         expect(results).toContain(items[i]);
       }
+    });
+
+    it('safely queries frozen objects (Object.freeze) using WeakMap fallback without errors', () => {
+      const qt = new Quadtree<Record<string, unknown>>({ x: 0, y: 0, width: 1000, height: 1000 });
+      const frozenItem = Object.freeze({ id: 99, x: 100, y: 100, width: 20, height: 20 });
+
+      expect(() => {
+        qt.insert(frozenItem);
+      }).not.toThrow();
+
+      expect(() => {
+        const res = qt.query({ x: 0, y: 0, width: 500, height: 500 });
+        expect(res).toContain(frozenItem);
+      }).not.toThrow();
+    });
+
+    it('always includes objects positioned far outside quadtree bounds in query results', () => {
+      const qt = new Quadtree<TestItem>({ x: 0, y: 0, width: 1000, height: 1000 });
+      const oobItem = { id: 888 };
+
+      qt.insert(oobItem, { x: 15000, y: 15000, width: 100, height: 100 });
+
+      // Query anywhere in the world
+      const res = qt.query({ x: 0, y: 0, width: 500, height: 500 });
+      expect(res).toContain(oobItem);
     });
   });
 

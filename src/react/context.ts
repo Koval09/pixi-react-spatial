@@ -7,6 +7,7 @@ export interface ViewportContextValue {
   getCamera: () => CameraState;
   getViewport: () => Size;
   subscribe: (listener: CameraListener) => () => void;
+  getOverlayElement: () => HTMLElement | null;
 }
 
 export type ViewportHandle = ViewportContextValue;

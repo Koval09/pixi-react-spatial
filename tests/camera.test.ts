@@ -84,6 +84,22 @@ describe('camera core module', () => {
       expect(clampedMax.zoom).toBe(5);
     });
 
+    it('safely clamps minZoom=0 and negative minZoom values to EPSILON (0.0001) without NaN or Infinity', () => {
+      const camera: CameraState = { x: 0, y: 0, zoom: 1 };
+      const viewport: Size = { width: 800, height: 600 };
+      const cursor: Point = { x: 400, y: 300 };
+
+      const clampedZero = zoomAtPoint(camera, cursor, 0, viewport, 0, 5);
+      expect(clampedZero.zoom).toBe(0.0001);
+      expect(Number.isNaN(clampedZero.x)).toBe(false);
+      expect(Number.isFinite(clampedZero.x)).toBe(true);
+
+      const clampedNegative = zoomAtPoint(camera, cursor, -10, viewport, -5, 5);
+      expect(clampedNegative.zoom).toBe(0.0001);
+      expect(Number.isNaN(clampedNegative.x)).toBe(false);
+      expect(Number.isFinite(clampedNegative.x)).toBe(true);
+    });
+
     it('returns original camera state if requested zoom equals current zoom', () => {
       const camera: CameraState = { x: 50, y: 50, zoom: 2 };
       const viewport: Size = { width: 800, height: 600 };

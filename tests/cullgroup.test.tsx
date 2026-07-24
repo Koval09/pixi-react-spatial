@@ -624,4 +624,41 @@ describe('CullGroup and useCullable React module', () => {
     expect(statsZoomIn.culled).toBeGreaterThan(80);
     expect(statsZoomIn.visible + statsZoomIn.culled).toBe(statsZoomIn.total);
   });
+
+  it('17. supports deferred registration when useCullable is mounted with initial null ref', async () => {
+    const mockTicker = createMockTicker();
+    const cullGroupRef = React.createRef<CullGroupHandle>();
+
+    function DeferredItem() {
+      const ref = useRef<HTMLDivElement | null>(null);
+      const [mounted, setMounted] = React.useState(false);
+      const getRect = React.useCallback(() => ({ x: 100, y: 100, width: 50, height: 50 }), []);
+
+      useCullable(ref, getRect);
+
+      React.useEffect(() => {
+        setMounted(true);
+      }, []);
+
+      return <div ref={mounted ? ref : null} data-testid="deferred-item" />;
+    }
+
+    render(
+      <SpatialViewport ticker={mockTicker} viewportWidth={800} viewportHeight={600} initialCamera={{ x: 100, y: 100, zoom: 1 }}>
+        <CullGroup ref={cullGroupRef}>
+          <DeferredItem />
+        </CullGroup>
+      </SpatialViewport>
+    );
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    mockTicker.tick();
+
+    const stats = cullGroupRef.current!.getStats();
+    expect(stats.total).toBe(1);
+    expect(stats.visible).toBe(1);
+  });
 });

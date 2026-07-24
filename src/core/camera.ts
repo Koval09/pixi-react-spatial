@@ -2,6 +2,8 @@ import type { Rect } from './quadtree';
 
 export type { Rect };
 
+const EPSILON = 0.0001;
+
 export interface Point {
   x: number;
   y: number;
@@ -54,10 +56,9 @@ export function zoomAtPoint(
   minZoom?: number,
   maxZoom?: number
 ): CameraState {
-  const targetZoom = Math.max(
-    minZoom ?? 0.0001,
-    Math.min(maxZoom ?? Infinity, nextZoom)
-  );
+  const safeMin = Math.max(EPSILON, minZoom ?? EPSILON);
+  const safeMax = Math.max(safeMin, maxZoom ?? Infinity);
+  const targetZoom = Math.max(safeMin, Math.min(safeMax, nextZoom));
 
   if (targetZoom === camera.zoom) {
     return camera;

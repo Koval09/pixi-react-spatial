@@ -32,6 +32,8 @@ export class Quadtree<T> {
   private nodes: Quadtree<T>[] = [];
   private boundsMap: Map<T, Rect>;
   private dirtySet: Set<T> = new Set<T>();
+  private outOfBoundsObjects: Set<T> = new Set<T>();
+  private queryStampMap = new WeakMap<object, number>();
   private currentQueryStamp = 0;
   private _rebuildCount = 0;
 
@@ -71,6 +73,7 @@ export class Quadtree<T> {
     if (this.level === 0) {
       this.boundsMap.clear();
       this.dirtySet.clear();
+      this.outOfBoundsObjects.clear();
     }
   }
 
@@ -161,6 +164,11 @@ export class Quadtree<T> {
     const itemBounds = this.getItemBounds(item, boundsParam);
     this.boundsMap.set(item, itemBounds);
 
+    if (this.level === 0 && !rectsOverlap(this.bounds, itemBounds)) {
+      this.outOfBoundsObjects.add(item);
+      return;
+    }
+
     if (this.nodes.length > 0) {
       const indices = this.getIndices(itemBounds);
       for (const index of indices) {
@@ -193,8 +201,18 @@ export class Quadtree<T> {
     }
   }
 
-  public remove(item: T, boundsParam?: Rect | ((item: T) => Rect)): boolean {
+  public remove(item: T, boundsParam?: Rect | ((item: T) => Rect), preserveDirty = false): boolean {
     const itemBounds = this.getItemBounds(item, boundsParam);
+
+    if (this.level === 0 && this.outOfBoundsObjects.has(item)) {
+      this.outOfBoundsObjects.delete(item);
+      this.boundsMap.delete(item);
+      if (!preserveDirty) {
+        this.dirtySet.delete(item);
+      }
+      return true;
+    }
+
     if (!rectsOverlap(this.bounds, itemBounds)) {
       return false;
     }
@@ -209,7 +227,7 @@ export class Quadtree<T> {
     if (this.nodes.length > 0) {
       const indices = this.getIndices(itemBounds);
       for (const i of indices) {
-        if (this.nodes[i].remove(item, itemBounds)) {
+        if (this.nodes[i].remove(item, itemBounds, preserveDirty)) {
           removed = true;
         }
       }
@@ -217,7 +235,9 @@ export class Quadtree<T> {
 
     if (removed && this.level === 0) {
       this.boundsMap.delete(item);
-      this.dirtySet.delete(item);
+      if (!preserveDirty) {
+        this.dirtySet.delete(item);
+      }
     }
     return removed;
   }
@@ -225,11 +245,11 @@ export class Quadtree<T> {
   public update(item: T, boundsParam?: Rect | ((item: T) => Rect)): void {
     const itemBounds = this.getItemBounds(item, boundsParam);
     this.boundsMap.set(item, itemBounds);
-    this.dirtySet.add(item);
 
-    // Pointwise update without full rebuild
-    this.remove(item, itemBounds);
+    // Pointwise update without full rebuild, preserving dirtySet entry
+    this.remove(item, itemBounds, true);
     this.insert(item, itemBounds);
+    this.dirtySet.add(item);
 
     // Trigger full rebuild ONLY if UNIQUE dirty items exceed 30% of total
     if (this.dirtySet.size > 0 && this.dirtySet.size > this.boundsMap.size * 0.3) {
@@ -252,13 +272,35 @@ export class Quadtree<T> {
       outResult.length = 0;
     }
 
+    const stamp = ++this.currentQueryStamp;
+
+    // Out-of-bounds objects are ALWAYS included ("out of index = visible" safe fallback)
+    if (this.level === 0 && this.outOfBoundsObjects.size > 0) {
+      for (const item of this.outOfBoundsObjects) {
+        this._markStampAndPush(item, stamp, result);
+      }
+    }
+
     if (!rectsOverlap(this.bounds, queryBounds)) {
       return result;
     }
 
-    const stamp = ++this.currentQueryStamp;
     this._queryInternal(queryBounds, getBounds, result, stamp);
     return result;
+  }
+
+  private _markStampAndPush(obj: T, stamp: number, result: T[]): void {
+    if (obj && typeof obj === 'object') {
+      const targetObj = obj as unknown as { _queryStamp?: number };
+      if (Object.isExtensible(targetObj)) {
+        if (targetObj._queryStamp === stamp) return;
+        targetObj._queryStamp = stamp;
+      } else {
+        if (this.queryStampMap.get(targetObj) === stamp) return;
+        this.queryStampMap.set(targetObj, stamp);
+      }
+    }
+    result.push(obj);
   }
 
   private _queryInternal(
@@ -269,21 +311,9 @@ export class Quadtree<T> {
   ): void {
     for (let i = 0; i < this.objects.length; i++) {
       const obj = this.objects[i];
-      const targetObj = obj as unknown as { _queryStamp?: number };
-      if (targetObj && typeof targetObj === 'object') {
-        if (targetObj._queryStamp === stamp) {
-          continue;
-        }
-        const b = this.getItemBounds(obj, getBounds);
-        if (rectsOverlap(queryBounds, b)) {
-          targetObj._queryStamp = stamp;
-          result.push(obj);
-        }
-      } else {
-        const b = this.getItemBounds(obj, getBounds);
-        if (rectsOverlap(queryBounds, b)) {
-          result.push(obj);
-        }
+      const b = this.getItemBounds(obj, getBounds);
+      if (rectsOverlap(queryBounds, b)) {
+        this._markStampAndPush(obj, stamp, result);
       }
     }
 

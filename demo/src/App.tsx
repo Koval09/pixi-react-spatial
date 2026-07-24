@@ -284,8 +284,6 @@ function SceneContent({
       targetElement={app.canvas as HTMLElement}
       worldWidth={8000}
       worldHeight={8000}
-      viewportWidth={window.innerWidth}
-      viewportHeight={window.innerHeight}
       clamp={true}
       minZoom={0.1}
       maxZoom={4.0}

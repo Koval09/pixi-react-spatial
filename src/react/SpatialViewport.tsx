@@ -116,6 +116,9 @@ function isValidContainer(node: unknown): boolean {
   );
 }
 
+const useIsomorphicLayoutEffect =
+  typeof window !== 'undefined' ? useLayoutEffect : useEffect;
+
 export const SpatialViewport = forwardRef<ViewportHandle, SpatialViewportProps>(
   function SpatialViewport(props, ref) {
     const {
@@ -140,6 +143,7 @@ export const SpatialViewport = forwardRef<ViewportHandle, SpatialViewportProps>(
 
     const [observedSize, setObservedSize] = useState<Size | null>(null);
     const viewportRootRef = useRef<HTMLDivElement | null>(null);
+    const overlayRef = useRef<HTMLElement | null>(null);
 
     // Imperative DOM overlay creation for Pixi canvas target mode
     useEffect(() => {
@@ -148,6 +152,7 @@ export const SpatialViewport = forwardRef<ViewportHandle, SpatialViewportProps>(
 
       let overlay = document.querySelector<HTMLElement>('[data-testid="spatial-viewport"]');
       let created = false;
+      let prevPos: string | undefined;
 
       if (!overlay) {
         overlay = document.createElement('div');
@@ -158,6 +163,7 @@ export const SpatialViewport = forwardRef<ViewportHandle, SpatialViewportProps>(
         overlay.style.overflow = 'hidden';
 
         const parent = targetElement.parentElement ?? document.body;
+        prevPos = parent.style.position;
         if (parent.style.position !== 'relative' && parent.style.position !== 'absolute') {
           parent.style.position = 'relative';
         }
@@ -165,9 +171,18 @@ export const SpatialViewport = forwardRef<ViewportHandle, SpatialViewportProps>(
         created = true;
       }
 
+      overlayRef.current = overlay;
+
       return () => {
         if (created && overlay && overlay.parentNode) {
           overlay.parentNode.removeChild(overlay);
+          const parent = targetElement.parentElement ?? document.body;
+          if (prevPos !== undefined) {
+            parent.style.position = prevPos;
+          }
+        }
+        if (overlayRef.current === overlay) {
+          overlayRef.current = null;
         }
       };
     }, [targetElement]);
@@ -240,7 +255,7 @@ export const SpatialViewport = forwardRef<ViewportHandle, SpatialViewportProps>(
       }
     }, []);
 
-    const lastReportedCam = useRef<string>('');
+    const lastReportedCamRef = useRef<CameraState | null>(null);
     const lastReportedTime = useRef<number>(0);
 
     const checkReportChange = useCallback(() => {
@@ -248,9 +263,15 @@ export const SpatialViewport = forwardRef<ViewportHandle, SpatialViewportProps>(
       const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
       if (now - lastReportedTime.current >= 100) {
         const cam = cameraRef.current;
-        const key = `${cam.x.toFixed(2)},${cam.y.toFixed(2)},${cam.zoom.toFixed(3)}`;
-        if (key !== lastReportedCam.current) {
-          lastReportedCam.current = key;
+        const last = lastReportedCamRef.current;
+        const EPS = 0.001;
+        if (
+          !last ||
+          Math.abs(cam.x - last.x) > EPS ||
+          Math.abs(cam.y - last.y) > EPS ||
+          Math.abs(cam.zoom - last.zoom) > EPS
+        ) {
+          lastReportedCamRef.current = { ...cam };
           lastReportedTime.current = now;
           onViewportChange(cam);
         }
@@ -267,13 +288,24 @@ export const SpatialViewport = forwardRef<ViewportHandle, SpatialViewportProps>(
       };
     }, []);
 
+    const getOverlayElement = useCallback(() => {
+      return (
+        overlayRef.current ??
+        viewportRootRef.current ??
+        (typeof document !== 'undefined'
+          ? document.querySelector<HTMLElement>('[data-testid="spatial-viewport"]')
+          : null)
+      );
+    }, []);
+
     const contextValue: ViewportContextValue = useMemo(
       () => ({
         getCamera,
         getViewport,
         subscribe,
+        getOverlayElement,
       }),
-      [getCamera, getViewport, subscribe]
+      [getCamera, getViewport, subscribe, getOverlayElement]
     );
 
     useImperativeHandle(ref, () => contextValue, [contextValue]);
@@ -328,7 +360,7 @@ export const SpatialViewport = forwardRef<ViewportHandle, SpatialViewportProps>(
       checkReportChange,
     ]);
 
-    useLayoutEffect(() => {
+    useIsomorphicLayoutEffect(() => {
       updateFrame();
     }, [updateFrame]);
 

@@ -115,7 +115,7 @@ export function WorldPortal(props: WorldPortalProps): React.ReactPortal | null {
     }
   }, [activeViewport, clampToScreen, hideWhenOffscreen]);
 
-  // Attach wrapper element to viewport container or body strictly after mount effect
+  // Attach wrapper element to viewport container via activeViewport.getOverlayElement()
   useEffect(() => {
     if (typeof document === 'undefined') return;
 
@@ -132,23 +132,33 @@ export function WorldPortal(props: WorldPortalProps): React.ReactPortal | null {
 
     wrapperRef.current = el;
 
-    let targetOverlay = document.querySelector<HTMLElement>('[data-testid="spatial-viewport"]');
-    if (!targetOverlay) {
-      targetOverlay = document.body;
+    let attached = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const tryAttach = () => {
+      if (attached) return;
+      const targetOverlay = activeViewport.getOverlayElement() ?? document.body;
+      targetOverlay.appendChild(el);
+      attached = true;
+      updatePosition();
+      setContainerMounted(true);
+    };
+
+    tryAttach();
+
+    if (!attached) {
+      retryTimer = setTimeout(tryAttach, 0);
     }
 
-    targetOverlay.appendChild(el);
-    updatePosition();
-    setContainerMounted(true);
-
     return () => {
+      if (retryTimer) clearTimeout(retryTimer);
       setContainerMounted(false);
       if (el.parentNode) {
         el.parentNode.removeChild(el);
       }
       wrapperRef.current = null;
     };
-  }, []);
+  }, [activeViewport, updatePosition]);
 
   useEffect(() => {
     const el = wrapperRef.current;
@@ -158,7 +168,12 @@ export function WorldPortal(props: WorldPortalProps): React.ReactPortal | null {
     if (style) Object.assign(el.style, style);
   }, [className, interactive, style]);
 
-  // Subscribe to ticker or activeViewport
+  const isGetter = typeof at === 'function';
+
+  // Single position update subscription:
+  // - If ticker is provided: use ticker.
+  // - Else if at is a getter function: ONLY use rAF loop.
+  // - Else (at is static point): ONLY subscribe to activeViewport.subscribe.
   useEffect(() => {
     if (!containerMounted) return;
 
@@ -167,19 +182,7 @@ export function WorldPortal(props: WorldPortalProps): React.ReactPortal | null {
       return () => {
         if (remove) remove();
       };
-    } else {
-      const unsubscribe = activeViewport.subscribe(updatePosition);
-      return () => {
-        unsubscribe();
-      };
-    }
-  }, [activeViewport, containerMounted, ticker, updatePosition]);
-
-  // Continuous frame loop when at is a getter function
-  useEffect(() => {
-    if (!containerMounted) return;
-
-    if (typeof at === 'function' && !ticker) {
+    } else if (isGetter) {
       let animId: number;
       const loop = () => {
         updatePosition();
@@ -189,8 +192,13 @@ export function WorldPortal(props: WorldPortalProps): React.ReactPortal | null {
       return () => {
         cancelAnimationFrame(animId);
       };
+    } else {
+      const unsubscribe = activeViewport.subscribe(updatePosition);
+      return () => {
+        unsubscribe();
+      };
     }
-  }, [at, containerMounted, ticker, updatePosition]);
+  }, [activeViewport, containerMounted, isGetter, ticker, updatePosition]);
 
   // Return null until DOM wrapper is attached to overlay to prevent leaking text nodes to Pixi React reconciler
   if (!containerMounted || !wrapperRef.current) {

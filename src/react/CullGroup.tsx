@@ -72,19 +72,21 @@ function isRectContained(outer: Rect, inner: Rect): boolean {
   );
 }
 
-export function useCullable(
-  targetRef: RefObject<unknown>,
+export function useCullable<T = unknown>(
+  targetRef: RefObject<T | null | undefined>,
   getRect: () => Rect
 ): { markDirty: () => void } {
   const context = useContext(CullGroupContext);
   const handleRef = useRef<CullableHandle | null>(null);
 
   useEffect(() => {
-    if (!context || !targetRef.current) return;
+    if (!context) return;
 
     const handle: CullableHandle = {
       getRect,
-      target: targetRef.current,
+      get target() {
+        return targetRef.current;
+      },
       cachedRect: getRect(),
       frameStamp: 0,
       lastVisibleState: undefined,

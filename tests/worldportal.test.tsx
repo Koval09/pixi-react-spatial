@@ -391,4 +391,42 @@ describe('WorldPortal React component', () => {
       );
     }).toThrow('WorldPortal must receive a viewport prop or be rendered inside SpatialViewport.');
   });
+
+  it('16. attaches overlay via getOverlayElement when viewport handle is passed before overlay creation', () => {
+    let vpHandle: ViewportHandle | null = null;
+    const mockTicker = createMockTicker();
+
+    function AppWithDelayedPortal() {
+      const [handle, setHandle] = useState<ViewportHandle | null>(null);
+
+      return (
+        <div>
+          <SpatialViewport
+            ref={(h) => {
+              setHandle(h);
+              vpHandle = h;
+            }}
+            ticker={mockTicker}
+            viewportWidth={800}
+            viewportHeight={600}
+            initialCamera={{ x: 0, y: 0, zoom: 1 }}
+          >
+            <div data-testid="scene-content" />
+          </SpatialViewport>
+          {handle && (
+            <WorldPortal viewport={handle} at={{ x: 100, y: 100 }} ticker={mockTicker}>
+              <div data-testid="delayed-portal">Delayed Portal</div>
+            </WorldPortal>
+          )}
+        </div>
+      );
+    }
+
+    const { getByTestId } = render(<AppWithDelayedPortal />);
+    mockTicker.tick();
+
+    const portalChild = getByTestId('delayed-portal');
+    expect(portalChild).toBeDefined();
+    expect(vpHandle!.getOverlayElement()).toBeDefined();
+  });
 });

@@ -137,7 +137,7 @@ function SceneContent({ cullingEnabled, staticCreatures, movingCreatures, moving
     if (!isInitialised || !app || !app.renderer || !circleTexture) {
         return null;
     }
-    return (_jsx(SpatialViewport, { ref: onSpatialViewportMount, targetElement: app.canvas, worldWidth: 8000, worldHeight: 8000, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight, clamp: true, minZoom: 0.1, maxZoom: 4.0, initialCamera: { x: 4000, y: 4000, zoom: 0.5 }, children: _jsxs(CullGroup, { ref: cullGroupRef, bounds: cullBounds, overscan: 0.2, enabled: cullingEnabled, children: [_jsx("pixiContainer", { children: staticCreatures.map((c) => (_jsx(StaticSpriteItem, { creature: c, texture: circleTexture }, c.id))) }), _jsx("pixiContainer", { children: movingCreatures.map((c) => (_jsx(MovingSpriteItem, { creature: c, texture: circleTexture, onRegisterUpdater: localRegisterUpdater }, c.id))) })] }) }));
+    return (_jsx(SpatialViewport, { ref: onSpatialViewportMount, targetElement: app.canvas, worldWidth: 8000, worldHeight: 8000, clamp: true, minZoom: 0.1, maxZoom: 4.0, initialCamera: { x: 4000, y: 4000, zoom: 0.5 }, children: _jsxs(CullGroup, { ref: cullGroupRef, bounds: cullBounds, overscan: 0.2, enabled: cullingEnabled, children: [_jsx("pixiContainer", { children: staticCreatures.map((c) => (_jsx(StaticSpriteItem, { creature: c, texture: circleTexture }, c.id))) }), _jsx("pixiContainer", { children: movingCreatures.map((c) => (_jsx(MovingSpriteItem, { creature: c, texture: circleTexture, onRegisterUpdater: localRegisterUpdater }, c.id))) })] }) }));
 }
 export default function App() {
     const [cullingEnabled, setCullingEnabled] = useState(true);
