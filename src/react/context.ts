@@ -1,8 +1,12 @@
 import { createContext, useContext } from 'react';
-import type { CameraState } from '../core/camera';
+import type { CameraState, Size } from '../core/camera';
+
+export type CameraListener = (camera: CameraState) => void;
 
 export interface ViewportContextValue {
-  camera: CameraState;
+  getCamera: () => CameraState;
+  getViewport: () => Size;
+  subscribe: (listener: CameraListener) => () => void;
 }
 
 export const ViewportContext = createContext<ViewportContextValue | null>(null);
